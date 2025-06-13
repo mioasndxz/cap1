@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AR 정리 도우미 (정지 분석 + 향상 기능)</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Noto Sans KR', sans-serif; margin: 0; padding: 0; background: #f7f7f7; color: #333; }
+    #video, canvas { display: block; margin: 0 auto; max-width: 100%; }
+    .box { max-width: 640px; margin: 16px auto; padding: 16px; background: #fff; border-radius: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+    button { padding: 10px 16px; margin: 8px 4px; font-size: 1em; background: #4a90e2; color: white; border: none; border-radius: 6px; cursor: pointer; }
+    ul { list-style: none; padding-left: 0; }
+    li { margin: 6px 0; }
+    input[type="checkbox"] { margin-right: 8px; transform: scale(1.2); }
+    .error { color: red; font-weight: bold; text-align: center; margin-top: 10px; }
+    .scoreBox, .tipsBox, .spaceBox { margin-top: 8px; font-weight: bold; color: #444; }
+  </style>
+</head>
+<body>
+
+<video id="video" autoplay muted playsinline></video>
+<canvas id="snapshotCanvas" width="640" height="480" style="display: none;"></canvas>
+<div class="box">
+  <button onclick="captureAndAnalyze('before')">📸 정리 전 분석</button>
+  <button onclick="captureAndAnalyze('after')">📸 정리 후 분석</button>
+</div>
+<div class="box" id="resultBox">사진을 찍고 분석 결과가 여기에 표시됩니다.</div>
+<div class="box scoreBox" id="scoreBox"></div>
+<div class="box spaceBox" id="spaceBox"></div>
+<div class="box tipsBox" id="tipsBox"></div>
+<div class="box" id="checklistBox"></div>
+<p class="error" id="errorMessage"></p>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0"></script>
+<script>
+(async () => {
+  await tf.setBackend('cpu');
+  await tf.ready();
+  console.log("✅ TensorFlow 백엔드:", tf.getBackend());
+})();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("snapshotCanvas");
+const ctx = canvas.getContext("2d");
+const resultBox = document.getElementById("resultBox");
+const checklistBox = document.getElementById("checklistBox");
+const scoreBox = document.getElementById("scoreBox");
+const tipsBox = document.getElementById("tipsBox");
+const spaceBox = document.getElementById("spaceBox");
+const errorMessage = document.getElementById("errorMessage");
+
+const tipDictionary = {
+  book: "📚 책은 책꽂이에 정리해 주세요.",
+  cup: "☕ 컵은 씻어서 제자리에 놓으세요.",
+  bottle: "🧴 병은 뚜껑을 닫아 정리함에 넣으세요.",
+  laptop: "💻 노트북은 닫아서 정돈된 위치에 놓으세요.",
+  chair: "🪑 의자는 책상 아래로 밀어 넣어주세요."
+};
+
+const checklistDictionary = {
+  book: ["책꽂이에 넣기"],
+  cup: ["컵 씻기", "건조대에 놓기"],
+  bottle: ["뚜껑 닫기", "재활용함에 넣기"],
+  laptop: ["덮개 닫기", "충전기 정리"],
+  chair: ["정위치 정렬"]
+};
+
+const spaceGroups = {
+  책상: ["book", "laptop", "mouse", "keyboard"],
+  주방: ["cup", "bottle", "bowl"],
+  방: ["chair", "bed", "pillow"]
+};
+
+let cocoModel;
+let beforeLabels = [];
+let afterLabels = [];
+
+function mapLabel(label) {
+  return label.toLowerCase();
+}
+
+function guessSpace(labels) {
+  const counts = {};
+  for (const key in spaceGroups) {
+    counts[key] = labels.filter(l => spaceGroups[key].includes(l)).length;
+  }
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return sorted[0][1] > 0 ? sorted[0][0] : "기타";
+}
+
+function generateTips(labels) {
+  const tips = [...new Set(labels.map(mapLabel))].map(l => tipDictionary[l]).filter(Boolean);
+  return tips.length ? tips.join(" ") : "정리 팁 없음";
+}
+
+function calculateScore(before, after) {
+  const delta = before.length - after.length;
+  let score = 50 + delta * 10;
+  if (score > 100) score = 100;
+  if (score < 0) score = 0;
+  return `🧹 정리 점수: ${score}점 (감지 수 ${before.length}개 → ${after.length}개)`;
+}
+
+function updateChecklist(labels) {
+  let html = `<strong>체크리스트:</strong><ul>`;
+  [...new Set(labels.map(mapLabel))].forEach(label => {
+    (checklistDictionary[label] || []).forEach(task => {
+      html += `<li><input type="checkbox"> ${task}</li>`;
+    });
+  });
+  html += '</ul>';
+  checklistBox.innerHTML = html;
+}
+
+async function captureAndAnalyze(stage) {
+  try {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const results = await cocoModel.detect(canvas);
+    const labels = results.map(r => r.class);
+    const lowerLabels = labels.map(mapLabel);
+
+    if (stage === 'before') {
+      beforeLabels = lowerLabels;
+      resultBox.innerHTML = `📌 정리 전 감지 (${labels.length}개): ` + labels.join(', ');
+      tipsBox.textContent = generateTips(lowerLabels);
+      updateChecklist(lowerLabels);
+      spaceBox.textContent = `예상 공간: ${guessSpace(lowerLabels)}`;
+      scoreBox.textContent = "";
+    } else {
+      afterLabels = lowerLabels;
+      resultBox.innerHTML = `📌 정리 후 감지 (${labels.length}개): ` + labels.join(', ');
+      const score = calculateScore(beforeLabels, afterLabels);
+      scoreBox.textContent = score;
+      tipsBox.textContent = generateTips(lowerLabels);
+      checklistBox.innerHTML = "✔️ 정리 후 체크리스트 완료 여부를 확인하세요.";
+      spaceBox.textContent = `예상 공간: ${guessSpace(lowerLabels)}`;
+    }
+  } catch (e) {
+    errorMessage.textContent = "❗ 분석 오류: " + e.message;
+  }
+}
+
+(async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    video.srcObject = stream;
+    await new Promise(res => video.onloadedmetadata = res);
+    cocoModel = await cocoSsd.load();
+  } catch (e) {
+    errorMessage.textContent = "❗ 카메라 오류: " + e.message;
+  }
+})();
+</script>
+
+</body>
+</html>
